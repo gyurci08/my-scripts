@@ -101,7 +101,6 @@ fi
 
 # Loop through each host and execute the ssh command
 for HOST in $HOSTS; do
-    echo "Connecting to $HOST..."
     # Pass the host and any additional ssh options to ssh
     if [ -n "$USERNAME" ]; then
         ssh -l "$USERNAME" "$HOST" "${@:2}"
