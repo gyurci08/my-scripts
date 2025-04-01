@@ -1,117 +1,169 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-# Check if SSH config file exists
-if [ ! -f ~/.ssh/config ]; then
-    echo "SSH config file not found."
-    exit 1
-fi
+## CONSTANTS ###################################################################
+readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+readonly SSH_CONFIG_FILE="${HOME}/.ssh/config"
+DEBUG_MODE=false
+MASS_MODE=false
 
-# Check if an argument was provided
-if [ -z "$1" ]; then
-    echo "Please provide a pattern to search for."
-    echo "Usage: $0 <pattern> [ssh options]"
-    exit 1
-fi
+## LOGGING FUNCTIONS ###########################################################
+log() {
+    local level="$1"; shift
+    local message="$1"
+    [[ "$level" == "DEBUG" && "$DEBUG_MODE" != true ]] && return
+    printf "%s - [%s] - %s\n" "$(date +"%Y-%m-%dT%H:%M:%S%z")" "$level" "$message"
+}
 
-# Extract username if provided
-if [[ $1 =~ "@" ]]; then
-    # Extract username and hostname
-    USERNAME=${1%@*}
-    HOST_PATTERN=${1#*@}
-else
-    USERNAME=""
-    HOST_PATTERN=$1
-fi
+## FUNCTIONS ###################################################################
+parse_arguments() {
+    local ssh_options=()
+    while getopts ":dXp:L:D:-:" opt; do
+        case ${opt} in
+            d) DEBUG_MODE=true ;;
+            X) ssh_options+=("-X") ;;
+            p|L|D) ssh_options+=("-${opt}" "${OPTARG}") ;;
+            -)
+                case "${OPTARG}" in
+                    mass) MASS_MODE=true ;;  # Enable mass mode
+                    *) log "ERROR" "Invalid long option --${OPTARG}" && exit 1 ;;
+                esac ;;
+            \?) log "ERROR" "Invalid option -${OPTARG}" && exit 1 ;;
+            :) log "ERROR" "Option -${OPTARG} requires an argument." && exit 1 ;;
+        esac
+    done
+    shift $((OPTIND - 1))
 
-# Get the hosts from the SSH config
+    [[ $# -lt 1 ]] && log "ERROR" "No pattern provided." && exit 1
+
+    PATTERN="$1"
+    shift || true
+    COMMAND=("$@")
+    SSH_OPTIONS=("${ssh_options[@]}")
+
+    log "DEBUG" "Arguments parsed successfully."
+}
+
+validate_prerequisites() {
+    [[ ! -f "${SSH_CONFIG_FILE}" ]] && log "WARN" "SSH config file not found. Proceeding without it."
+    [[ -z "${PATTERN:-}" ]] && log "ERROR" "No pattern provided." && exit 1
+    log "DEBUG" "Prerequisites validated."
+}
+
+extract_hosts() {
+    local host_pattern="${PATTERN}"
+
+    if [[ "${host_pattern}" =~ "@" ]]; then
+        USERNAME="${host_pattern%@*}"
+        HOST_PATTERN="${host_pattern#*@}"
+        log "DEBUG" "Extracted username: ${USERNAME}, host pattern: ${HOST_PATTERN}"
+    else
+        USERNAME=""
+        HOST_PATTERN="${host_pattern}"
+        log "DEBUG" "Host pattern: ${HOST_PATTERN}"
+    fi
+
 HOSTS=$(awk -v pattern="$HOST_PATTERN" '
-    # Convert pattern to lowercase once
-    BEGIN { lp = tolower(pattern) }
+    # Remove leading/trailing whitespace
+    { sub(/^ +/, ""); sub(/ +$/, ""); }
 
-    # Remove leading whitespace and skip empty lines
-    {sub(/^ +/, ""); if (NF == 0) next}
+    # Skip empty lines or comments
+    /^$/ || /^#/ { next }
 
-    # Handle Host lines
-    /^Host/ {
-        if (NF == 2) {                             # Only one Host
-            single_host = $2
-            lc_str = tolower(single_host)
-            if (lc_str !~ /\*/ && lc_str ~ lp) {
-                if (!seen[single_host]) {
-                    known_host = single_host
-                }
-            }
-        } else { # Multiple Hosts
-            for (i = 2; i <= NF; i++) {
-                lc_str = tolower($i)
-                if (lc_str !~ /\*/ && lc_str ~ lp && !seen[$i]) {
-                    print $i
-                    seen[$i] = 1
-                }
-            }
+    # Handle Hostname lines and associate them with the current host
+    /^Hostname/ {
+        if (current_host) {
+            hostnames[current_host] = $2
         }
     }
 
-    # Handle Hostname lines
-    /^Hostname/ {
-        hostname = $2
-        if (single_host != "") {                   # If there was only one Host
-            lc_str = tolower(hostname)
-            if (lc_str !~ /\*/ && lc_str ~ lp && !seen[hostname]) {
-                print hostname
-                seen[hostname] = 1
-                known_host = ""
+    # Handle Host lines
+    /^Host/ {
+        split($0, hosts, " ")
+        for (i=2; i<=NF; i++) {
+            if (hosts[i] !~ /\*/) {
+                current_host = hosts[i]
+                hosts_array[hosts[i]] # Store host without *
             }
         }
     }
 
     END {
-        if (known_host != "" && !seen[known_host]) {
-            print known_host
-            seen[known_host] = 1
+        for (host in hosts_array) {
+            if (tolower(host) ~ pattern && host !~ /\*$/) {
+                if (hostnames[host]) {
+                    if (!(hostnames[host] in printed)) {
+                        print hostnames[host] # Print Hostname if available
+                        printed[hostnames[host]] = 1
+                    }
+                } else {
+                    if (!(host in printed)) {
+                        print host # Otherwise, print Host entry itself
+                        printed[host] = 1
+                    }
+                }
+            }
         }
     }
 ' ~/.ssh/config
 )
 
-# Check if hosts were found
-if [ -z "$HOSTS" ]; then
-    echo "No hosts found matching the pattern."
-    exit 1
-fi
+    HOST_COUNT=$(echo "$HOSTS" | wc -l)
 
-# Check if multiple hosts are found and no command is provided
-if [ $(echo "$HOSTS" | wc -w) -gt 1 ] && [ ${#} -eq 1 ]; then
-    echo "Multiple hosts found:"
-    for HOST in $HOSTS; do
-        echo "- $HOST"
-    done
-    echo "Please specify a command to proceed."
-    exit 1
-fi
+    if [[ $HOST_COUNT -gt 1 ]]; then
+        if [[ "$MASS_MODE" != true ]]; then
+            log "ERROR" "Multiple hosts detected. Use --mass flag to execute commands on multiple hosts." && exit 1
+        fi
 
-# Check if multiple hosts are found and prompt for confirmation
-if [ $(echo "$HOSTS" | wc -w) -gt 1 ]; then
-    echo "Multiple hosts found:"
-    echo "The following hosts will be affected:"
-    for HOST in $HOSTS; do
-        echo "- $HOST"
-    done
-    read -p "Are you sure you want to execute the command on all these hosts? (y/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        echo "Operation cancelled."
-        exit 1
+        if [[ ${#COMMAND[@]} -eq 0 ]]; then
+            log "ERROR" "--mass requires a command to be provided." && exit 1
+        fi
     fi
-fi
 
-# Loop through each host and execute the ssh command
-for HOST in $HOSTS; do
-    echo "Connecting to $HOST..."
-    # Pass the host and any additional ssh options to ssh
-    if [ -n "$USERNAME" ]; then
-        ssh -l "$USERNAME" "$HOST" "${@:2}"
-    else
-        ssh "$HOST" "${@:2}"
+    if [[ -z "${HOSTS}" ]]; then
+        log "WARN" "No hosts found matching '${HOST_PATTERN}'. Falling back to direct connection."
+        HOSTS="${HOST_PATTERN}"  # Fallback to the provided input as the host.
     fi
-done
+
+    log "DEBUG" "Matching hosts: $(echo "${HOSTS}" | tr '\n' ' ')"
+}
+
+execute_ssh_command() {
+    for HOST in ${HOSTS}; do
+        local ssh_command=("ssh" "-q" "-o" "LogLevel=error")
+        [[ -n "${USERNAME}" ]] && ssh_command+=("-l" "${USERNAME}")
+        ssh_command+=("${SSH_OPTIONS[@]}" "${HOST}")
+
+        if [[ ${#COMMAND[@]} -gt 0 ]]; then
+            ssh_command+=("${COMMAND[@]}")
+            log "DEBUG" "Executing command: ${ssh_command[*]}"
+
+            # Execute command and handle errors gracefully
+            if ! "${ssh_command[@]}"; then
+                log "ERROR" "Command failed on ${HOST}"
+                continue  # Proceed to the next host
+            fi
+        else
+            log "DEBUG" "Opening interactive session: ${ssh_command[*]}"
+
+            # Open interactive session and handle errors gracefully
+            if ! "${ssh_command[@]}"; then
+                log "ERROR" "Session failed on ${HOST}"
+                continue  # Proceed to the next host
+            fi
+        fi
+
+        log "DEBUG" "Command executed successfully on ${HOST}"
+    done
+
+    log "DEBUG" "All commands attempted."
+}
+
+
+## MAIN EXECUTION ##############################################################
+trap 'log "ERROR" "Operation interrupted."; exit 130' SIGINT
+
+parse_arguments "$@"
+validate_prerequisites
+extract_hosts
+execute_ssh_command
