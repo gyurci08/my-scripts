@@ -13,8 +13,18 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
+# Extract username if provided
+if [[ $1 =~ "@" ]]; then
+    # Extract username and hostname
+    USERNAME=${1%@*}
+    HOST_PATTERN=${1#*@}
+else
+    USERNAME=""
+    HOST_PATTERN=$1
+fi
+
 # Get the hosts from the SSH config
-HOSTS=$(awk -v pattern="$1" '
+HOSTS=$(awk -v pattern="$HOST_PATTERN" '
     # Convert pattern to lowercase once
     BEGIN { lp = tolower(pattern) }
 
@@ -98,15 +108,10 @@ fi
 # Loop through each host and execute the ssh command
 for HOST in $HOSTS; do
     echo "Connecting to $HOST..."
-    # Check if username is included
-    if [[ $HOST =~ "@" ]]; then
-        # Extract username and hostname
-        USERNAME=${HOST%@*}
-        HOSTNAME=${HOST#*@}
-        # Pass the host and any additional ssh options to ssh
-        ssh -l "$USERNAME" "$HOSTNAME" "${@:2}"
+    # Pass the host and any additional ssh options to ssh
+    if [ -n "$USERNAME" ]; then
+        ssh -l "$USERNAME" "$HOST" "${@:2}"
     else
-        # Pass the host and any additional ssh options to ssh
         ssh "$HOST" "${@:2}"
     fi
 done
