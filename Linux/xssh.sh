@@ -147,13 +147,20 @@ extract_hosts() {
 
     if [[ $HOST_COUNT -gt 1 ]]; then
         if [[ "$MASS_MODE" != true ]]; then
-            log "ERROR" "Multiple hosts detected. Use --mass flag to execute commands on multiple hosts." && exit 1
+            echo "Multiple hosts detected:"
+            for host in $HOSTS; do
+                echo "- $host"
+            done
+            echo "Use --mass flag to execute commands on multiple hosts."
+            exit 1
         fi
 
         if [[ ${#COMMAND[@]} -eq 0 ]]; then
-            log "ERROR" "--mass requires a command to be provided." && exit 1
+            log "ERROR" "--mass requires a command to be provided."
+            exit 1
         fi
     fi
+
 
     if [[ -z "${HOSTS}" ]]; then
         log "WARN" "No hosts found matching '${HOST_PATTERN}'. Falling back to direct connection."
@@ -164,16 +171,12 @@ extract_hosts() {
 }
 
 execute_ssh_command() {
-    if [[ "$MASS_MODE" != true && $(echo "${HOSTS}" | wc -l) -ne 1 ]]; then
-        log "ERROR" "Multiple hosts detected. Use --mass flag for mass operations." && exit 1
-    fi
-
     for HOST in ${HOSTS}; do
         if [[ "$MASS_MODE" != true ]]; then
             echo -ne "\033]30;${USERNAME}@${HOST}\007"
         fi
 
-        local ssh_command=("ssh" "-q" "-o" "LogLevel=error")
+        local ssh_command=("ssh" "-q" "-o" "LogLevel=error" "-o" "ConnectTimeout=5")
         if [[ -n "${USERNAME}" ]]; then
             ssh_command+=("-l" "${USERNAME}")
         fi
