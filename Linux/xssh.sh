@@ -38,6 +38,9 @@ Options:
   -l file     Specify log file (optional).
   --mass      Enable mass mode for executing commands on multiple hosts.
 
+Restricted Commands (mass mode only):
+  shutdown, poweroff, reboot
+
 Examples:
   $SCRIPT_NAME user@host ls -l
   $SCRIPT_NAME -l /path/to/logfile user@host ls -l
@@ -77,12 +80,27 @@ parse_arguments() {
     SSH_OPTIONS=("${ssh_options[@]}")
 
     log "DEBUG" "Arguments parsed successfully."
+
+    # Validate only in mass mode
+    if [[ "$MASS_MODE" == true && ${#COMMAND[@]} -gt 0 ]]; then
+        validate_command
+    fi
 }
 
 validate_prerequisites() {
     [[ ! -f "${SSH_CONFIG_FILE}" ]] && log "WARN" "SSH config file not found. Proceeding without it."
     [[ -z "${PATTERN:-}" ]] && log "ERROR" "No pattern provided." && exit 1
     log "DEBUG" "Prerequisites validated."
+}
+
+validate_command() {
+    local forbidden_commands=("shutdown" "poweroff" "reboot")
+    for cmd in "${forbidden_commands[@]}"; do
+        if [[ "${COMMAND[*]}" =~ $cmd ]]; then
+            log "ERROR" "The command '${cmd}' is not allowed in mass mode."
+            exit 1
+        fi
+    done
 }
 
 extract_hosts() {
@@ -140,7 +158,7 @@ extract_hosts() {
                 }
             }
         }
-    ' ~/.ssh/config
+    ' ${SSH_CONFIG_FILE}
 )
 
     HOST_COUNT=$(echo "$HOSTS" | wc -l)
@@ -160,7 +178,6 @@ extract_hosts() {
             exit 1
         fi
     fi
-
 
     if [[ -z "${HOSTS}" ]]; then
         log "WARN" "No hosts found matching '${HOST_PATTERN}'. Falling back to direct connection."
