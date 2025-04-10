@@ -7,6 +7,7 @@ readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SSH_CONFIG_FILE="${HOME}/.ssh/config"
 LOG_FILE=""
 DEBUG_MODE=false
+VERBOSE_MODE=false
 MASS_MODE=false
 
 ## LOGGING FUNCTIONS ###########################################################
@@ -32,6 +33,7 @@ Usage: $SCRIPT_NAME [options] pattern [command]
 
 Options:
   -d          Enable debug mode.
+  -v          Enable verbose mode.
   -X          Enable X11 forwarding.
   -p port     Specify SSH port.
   -L [bind_address:]port:host:hostport
@@ -54,12 +56,13 @@ EOF
 
 parse_arguments() {
     local ssh_options=()
-    while getopts ":dXp:L:D:l:-:" opt; do
+    while getopts ":dXp:L:D:l:v-:" opt; do
         case ${opt} in
             d) DEBUG_MODE=true ;;
             X) ssh_options+=("-X") ;;
             p|L|D) ssh_options+=("-${opt}" "${OPTARG}") ;;
             l) LOG_FILE="${OPTARG}" ;;
+            v) VERBOSE_MODE=true ;;
             -)
                 case "${OPTARG}" in
                     mass) MASS_MODE=true ;;
@@ -192,6 +195,10 @@ extract_hosts() {
 
 execute_ssh_command() {
     for HOST in ${HOSTS}; do
+        if [[ "$VERBOSE_MODE" == true ]]; then
+            echo "Executing command on $HOST:"
+        fi
+
         if [[ "$MASS_MODE" != true ]]; then
             echo -ne "\033]30;${USERNAME}@${HOST}\007"
         fi
@@ -230,20 +237,57 @@ execute_ssh_command() {
     log "DEBUG" "All commands attempted."
 }
 
-## Parallel Execution (Optional)
 parallel_execute() {
     if [[ "$MASS_MODE" == true ]]; then
+        local tmpdir=$(mktemp -d)
         for HOST in ${HOSTS}; do
+            local tmpfile="${tmpdir}/${HOST}.out"
             (
-                execute_ssh_command_single_host "$HOST"
+                if [[ "$VERBOSE_MODE" == true ]]; then
+                    echo "--- $HOST ---" > "$tmpfile"
+                fi
+
+                local ssh_command=("ssh" "-q" "-o" "LogLevel=error")
+                if [[ -n "${USERNAME}" ]]; then
+                    ssh_command+=("-l" "${USERNAME}")
+                fi
+                ssh_command+=("${SSH_OPTIONS[@]}" "${HOST}")
+
+                if [[ ${#COMMAND[@]} -gt 0 ]]; then
+                    ssh_command+=("${COMMAND[@]}")
+                    log "DEBUG" "Executing command on ${HOST}: ${ssh_command[*]}"
+                    
+                    if ! "${ssh_command[@]}" >> "$tmpfile"; then
+                        log "ERROR" "Command failed on ${HOST}"
+                    fi
+                else
+                    log "DEBUG" "Opening interactive session on ${HOST}: ${ssh_command[*]}"
+                    
+                    if ! "${ssh_command[@]}" >> "$tmpfile"; then
+                        log "ERROR" "Session failed on ${HOST}"
+                    fi
+                fi
+
+                log "DEBUG" "Command executed on ${HOST}"
             ) &
         done
         wait
+
+        for file in "${tmpdir}"/*.out; do
+            cat "$file"
+        done
+
+        rm -rf "$tmpdir"
     fi
 }
 
+
 execute_ssh_command_single_host() {
     local HOST="$1"
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        echo "--- $HOST ---"
+    fi
+
     local ssh_command=("ssh" "-q" "-o" "LogLevel=error")
     if [[ -n "${USERNAME}" ]]; then
         ssh_command+=("-l" "${USERNAME}")
@@ -267,6 +311,7 @@ execute_ssh_command_single_host() {
 
     log "DEBUG" "Command executed on ${HOST}"
 }
+
 
 ## MAIN EXECUTION ##############################################################
 trap 'log "ERROR" "Operation interrupted."; exit 130' SIGINT
