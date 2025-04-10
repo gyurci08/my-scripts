@@ -247,13 +247,14 @@ parallel_execute() {
                     echo "--- $HOST ---" > "$tmpfile"
                 fi
 
-                local ssh_command=("ssh" "-q" "-o" "LogLevel=error")
+                local ssh_command=("ssh" "-q" "-o" "LogLevel=error" "-o" "ControlMaster auto" "-o" "ControlPersist 4h")
                 if [[ -n "${USERNAME}" ]]; then
                     ssh_command+=("-l" "${USERNAME}")
                 fi
                 ssh_command+=("${SSH_OPTIONS[@]}" "${HOST}")
 
                 if [[ ${#COMMAND[@]} -gt 0 ]]; then
+                    ssh_command+=("-T")
                     ssh_command+=("${COMMAND[@]}")
                     log "DEBUG" "Executing command on ${HOST}: ${ssh_command[*]}"
                     
