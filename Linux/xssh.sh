@@ -158,7 +158,7 @@ extract_hosts() {
                 }
             }
         }
-    ' ${SSH_CONFIG_FILE}
+    ' ${SSH_CONFIG_FILE} | sort -V
 )
 
     HOST_COUNT=$(echo "$HOSTS" | wc -l)

@@ -55,4 +55,4 @@ awk -v pattern="$1" '
             }
         }
     }
-' ~/.ssh/config
+' ~/.ssh/config | sort -V
