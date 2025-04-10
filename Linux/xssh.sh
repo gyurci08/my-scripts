@@ -5,7 +5,7 @@ set -Eeuo pipefail
 readonly SCRIPT_DIR="$(dirname "$(realpath -s "${BASH_SOURCE[0]}")")"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SSH_CONFIG_FILE="${HOME}/.ssh/config"
-LOG_FILE=""  # Default to no log file
+LOG_FILE=""
 DEBUG_MODE=false
 MASS_MODE=false
 
@@ -13,6 +13,9 @@ MASS_MODE=false
 log() {
     local level="$1"; shift
     local message="$1"
+    if [[ "$level" == "DEBUG" && "$DEBUG_MODE" == true ]]; then
+        echo "$message"
+    fi
     [[ "$level" == "DEBUG" && "$DEBUG_MODE" != true ]] && return
     if [[ -n "$LOG_FILE" ]]; then
         printf "%s - [%s] - %s\n" "$(date +"%Y-%m-%dT%H:%M:%S%z")" "$level" "$message" >> "$LOG_FILE"
@@ -80,7 +83,7 @@ parse_arguments() {
     SSH_OPTIONS=("${ssh_options[@]}")
 
     log "DEBUG" "Arguments parsed successfully."
-
+    
     # Validate only in mass mode
     if [[ "$MASS_MODE" == true && ${#COMMAND[@]} -gt 0 ]]; then
         validate_command
@@ -105,7 +108,7 @@ validate_command() {
 
 extract_hosts() {
     local host_pattern="${PATTERN}"
-
+    
     if [[ "${host_pattern}" =~ "@" ]]; then
         USERNAME="${host_pattern%@*}"
         HOST_PATTERN="${host_pattern#*@}"
@@ -162,8 +165,8 @@ extract_hosts() {
 )
 
     HOST_COUNT=$(echo "$HOSTS" | wc -l)
-
-    if [[ $HOST_COUNT -gt 1 ]]; then
+    
+    if [[ $HOST_COUNT -gt 1 ]]; then 
         if [[ "$MASS_MODE" != true ]]; then
             echo "Multiple hosts detected:"
             for host in $HOSTS; do
@@ -173,13 +176,13 @@ extract_hosts() {
             exit 1
         fi
 
-        if [[ ${#COMMAND[@]} -eq 0 ]]; then
+        if [[ ${#COMMAND[@]} -eq 0 ]]; then 
             log "ERROR" "--mass requires a command to be provided."
-            exit 1
-        fi
+            exit 1 
+        fi 
     fi
 
-    if [[ -z "${HOSTS}" ]]; then
+    if [[ -z "${HOSTS}" ]]; then 
         log "WARN" "No hosts found matching '${HOST_PATTERN}'. Falling back to direct connection."
         HOSTS="${HOST_PATTERN}"  # Fallback to the provided input as the host.
     fi
@@ -202,14 +205,14 @@ execute_ssh_command() {
         if [[ ${#COMMAND[@]} -gt 0 ]]; then
             ssh_command+=("${COMMAND[@]}")
             log "DEBUG" "Executing command: ${ssh_command[*]}"
-
+            
             if ! "${ssh_command[@]}"; then
                 log "ERROR" "Command failed on ${HOST}"
                 continue
             fi
         else
             log "DEBUG" "Opening interactive session: ${ssh_command[*]}"
-
+            
             if ! "${ssh_command[@]}"; then
                 log "ERROR" "Session failed on ${HOST}"
                 continue
@@ -250,13 +253,13 @@ execute_ssh_command_single_host() {
     if [[ ${#COMMAND[@]} -gt 0 ]]; then
         ssh_command+=("${COMMAND[@]}")
         log "DEBUG" "Executing command on ${HOST}: ${ssh_command[*]}"
-
+        
         if ! "${ssh_command[@]}"; then
             log "ERROR" "Command failed on ${HOST}"
         fi
     else
         log "DEBUG" "Opening interactive session on ${HOST}: ${ssh_command[*]}"
-
+        
         if ! "${ssh_command[@]}"; then
             log "ERROR" "Session failed on ${HOST}"
         fi
