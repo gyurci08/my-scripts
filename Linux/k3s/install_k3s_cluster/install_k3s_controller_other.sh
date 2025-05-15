@@ -8,11 +8,11 @@ readonly LOG_PREFIX="[K3S-SECONDARY]"
 readonly KUBECONFIG_PATH="/etc/rancher/k3s/k3s.yaml"
 
 ## CONFIGURATION VARIABLES #####################################################
-K3S_TOKEN="${K3S_TOKEN:-changeme}"                 # Must match primary cluster token
-K3S_SERVER_IP="${K3S_SERVER_IP:-10.1.0.10}"       # Primary node's IP
-K3S_TLS_SAN="${K3S_TLS_SAN:-$K3S_SERVER_IP}"      # This node's IP or DNS
-K3S_CLUSTER_CIDR="${K3S_CLUSTER_CIDR:-172.16.0.0/16}"
-K3S_SERVICE_CIDR="${K3S_SERVICE_CIDR:-172.17.0.0/16}"
+K3S_TOKEN="${K3S_TOKEN:-changeme}"
+K3S_SERVER_IP="${K3S_SERVER_IP:-10.1.0.10}"
+K3S_TLS_SAN="${K3S_TLS_SAN:-$K3S_SERVER_IP}"
+K3S_CLUSTER_CIDR="${K3S_CLUSTER_CIDR:-172.17.0.0/16}"
+K3S_SERVICE_CIDR="${K3S_SERVICE_CIDR:-172.18.0.0/16}"
 
 ## FUNCTIONS ###################################################################
 
@@ -50,14 +50,13 @@ check_os() {
 install_dependencies() {
     local os=$(check_os)
     log_info "Installing dependencies for $os"
-
     case $os in
         ubuntu|debian)
             sudo apt-get update
-            sudo apt-get install -y curl ipcalc
+            sudo apt-get install -y curl
             ;;
         opensuse*|sles)
-            sudo zypper --non-interactive install curl ipcalc
+            sudo zypper --non-interactive install curl
             ;;
         *)
             log_error "Unsupported OS: $os"
@@ -78,7 +77,6 @@ setup_kubeconfig() {
 wait_for_api() {
     local timeout=300
     log_info "Waiting for Kubernetes API (timeout: ${timeout}s)"
-
     for ((i=0; i<timeout; i++)); do
         if kubectl get nodes &>/dev/null; then
             log_info "Kubernetes API available after ${i}s"
@@ -86,19 +84,15 @@ wait_for_api() {
         fi
         sleep 1
     done
-
     log_error "Timeout waiting for Kubernetes API"
     exit 1
 }
 
 install_k3s() {
     log_header "Joining cluster as secondary controller"
-
     curl -sfL https://get.k3s.io | K3S_TOKEN="$K3S_TOKEN" sh -s - server \
         --server "https://${K3S_SERVER_IP}:6443" \
         --tls-san="$K3S_TLS_SAN" \
-        --flannel-backend=none \
-        --disable-network-policy \
         --disable traefik \
         --cluster-cidr="$K3S_CLUSTER_CIDR" \
         --service-cidr="$K3S_SERVICE_CIDR" \
