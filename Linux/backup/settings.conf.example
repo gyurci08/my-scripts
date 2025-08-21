@@ -5,12 +5,10 @@
 # Paths with spaces must be quoted.
 SOURCE_DIRS=(
     "${HOME}/.var/app/app.zen_browser.zen/.zen/"
-    "${HOME}/Webstar/"
-    "${HOME}/Devops/"
 )
 
 # The destination directory for the backup archives.
-BACKUP_DEST="/mnt/main/centralshare/backup/gyurci08-latitude/"
+BACKUP_DEST="/mnt/backup"
 
 # The filename prefix for the archive. The final name will be:
 # ${FILENAME_PREFIX}_YYYYMMDD_HHMMSS.tar.${COMPRESSION_EXT}
