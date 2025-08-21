@@ -1,339 +1,279 @@
 #!/usr/bin/env bash
+#===============================================================================
+# xssh - Execute commands over SSH with host discovery and mass mode
+#
+# Refactored for improved robustness, portability, and error handling.
+#===============================================================================
+
 set -Eeuo pipefail
 
-## CONSTANTS ###################################################################
-readonly SCRIPT_DIR="$(dirname "$(realpath -s "${BASH_SOURCE[0]}")")"
+# --- Constants & Globals ---
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-readonly SSH_CONFIG_FILE="${HOME}/.ssh/config"
+readonly SSH_MAIN_CONFIG="${HOME}/.ssh/config"
+
+# Global state variables
 LOG_FILE=""
-DEBUG_MODE=false
 VERBOSE_MODE=false
 MASS_MODE=false
+LIST_ALL_MODE=false
+LIST_VERBOSE_MODE=false
+SSH_OPTIONS=()
+SSH_CONFIG_FILES=()
+PATTERN=""
+COMMAND=()
+USERNAME=""
+HOSTS=()
+XSSH_TMPDIR=""
 
-## LOGGING FUNCTIONS ###########################################################
+# --- Core Utilities & Trap Handling ---
+
 log() {
-    local level="$1"; shift
-    local message="$1"
-    if [[ "$level" == "DEBUG" && "$DEBUG_MODE" == true ]]; then
-        echo "$message"
-    fi
-    [[ "$level" == "DEBUG" && "$DEBUG_MODE" != true ]] && return
-    if [[ -n "$LOG_FILE" ]]; then
-        printf "%s - [%s] - %s\n" "$(date +"%Y-%m-%dT%H:%M:%S%z")" "$level" "$message" >> "$LOG_FILE"
-    fi
-    if [[ "$level" == "ERROR" ]]; then
-        echo "$message" >&2
-    fi
+  local level="$1"; shift
+  local msg="$*"
+  local ts; ts="$(date +"%Y-%m-%dT%H:%M:%S%z")"
+  local reset="\033[0m"; local color=""
+  case "$level" in
+    WARN) color="\033[33m" ;;
+    ERROR) color="\033[31m" ;;
+  esac
+  local stream=1; [[ "$level" != "INFO" ]] && stream=2
+  local line="${ts} [${SCRIPT_NAME}] [$level] ${msg}"
+  printf '%b%s%b\n' "$color" "$line" "$reset" >&stream
+  if [[ -n "$LOG_FILE" ]]; then
+    printf '%s\n' "$line" >>"$LOG_FILE"
+  fi
 }
 
-## FUNCTIONS ###################################################################
+trap_off() {
+  trap - ERR
+}
+
+err_handler() {
+  log "ERROR" "Unexpected error on line $1: $2"
+}
+
+sigint_handler() {
+  log "ERROR" "Operation interrupted."
+  trap_off
+  exit 130
+}
+
+exit_handler() {
+  if [[ -n "$XSSH_TMPDIR" && -d "$XSSH_TMPDIR" ]]; then
+    rm -rf "$XSSH_TMPDIR"
+  fi
+}
+
+trap 'err_handler $LINENO "$BASH_COMMAND"' ERR
+trap 'sigint_handler' SIGINT
+trap 'exit_handler' EXIT
+
+# --- Helper Functions ---
+
+sanitize_for_filename() {
+  # Replace characters that are problematic in filenames.
+  # Keeps alphanumeric, dots, hyphens, and underscores. Replaces others with an underscore.
+  printf '%s' "$1" | sed 's/[^a-zA-Z0-9._-]/_/g'
+}
+
+# --- Usage & Help ---
+
 usage() {
-    cat << EOF
-Usage: $SCRIPT_NAME [options] pattern [command]
+  cat <<'EOF'
+Usage:
+  xssh [options] pattern [command]
+  xssh -l                     # List all hosts from SSH config(s)
+  xssh -V                     # List "alias<TAB>hostname" for all hosts
 
 Options:
-  -d          Enable debug mode.
-  -v          Enable verbose mode.
-  -X          Enable X11 forwarding.
-  -p port     Specify SSH port.
-  -L [bind_address:]port:host:hostport
-             Specify local port forwarding.
-  -D [bind_address:]port
-             Specify dynamic port forwarding.
-  -l file     Specify log file (optional).
-  --mass      Enable mass mode for executing commands on multiple hosts.
-
-Restricted Commands (mass mode only):
-  shutdown, poweroff, reboot
-
-Examples:
-  $SCRIPT_NAME user@host ls -l
-  $SCRIPT_NAME -l /path/to/logfile user@host ls -l
-  $SCRIPT_NAME --mass pattern ls -l
-
+  -v                 Verbose mode.
+  -X                 X11 forwarding.
+  -p port            SSH port.
+  -L arg             Local port forwarding.
+  -D arg             Dynamic port forwarding.
+  -l                 List all hosts (no connect).
+  -V                 Verbose list: alias<TAB>hostname.
+  --log FILE         Append logs to file.
+  --mass             Execute command on multiple hosts.
+  -h, --help         Show help.
 EOF
 }
 
+# --- Business Logic ---
+
 parse_arguments() {
-    local ssh_options=()
-    while getopts ":dXp:L:D:l:v-:" opt; do
-        case ${opt} in
-            d) DEBUG_MODE=true ;;
-            X) ssh_options+=("-X") ;;
-            p|L|D) ssh_options+=("-${opt}" "${OPTARG}") ;;
-            l) LOG_FILE="${OPTARG}" ;;
-            v) VERBOSE_MODE=true ;;
-            -)
-                case "${OPTARG}" in
-                    mass) MASS_MODE=true ;;
-                    *) log "ERROR" "Invalid long option --${OPTARG}" && usage && exit 1 ;;
-                esac ;;
-            \?) log "ERROR" "Invalid option -${OPTARG}" && usage && exit 1 ;;
-            :) log "ERROR" "Option -${OPTARG} requires an argument." && usage && exit 1 ;;
-        esac
-    done
-    shift $((OPTIND - 1))
-
-    if [[ $# -lt 1 ]]; then
-        log "ERROR" "No pattern provided."
-        usage
-        exit 1
-    fi
-
-    PATTERN="$1"
-    shift || true
-    COMMAND=("$@")
-    SSH_OPTIONS=("${ssh_options[@]}")
-
-    log "DEBUG" "Arguments parsed successfully."
-    
-    # Validate only in mass mode
-    if [[ "$MASS_MODE" == true && ${#COMMAND[@]} -gt 0 ]]; then
-        validate_command
-    fi
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      -v) VERBOSE_MODE=true; shift ;;
+      -X) SSH_OPTIONS+=("-X"); shift ;;
+      -p|-L|-D) [[ -z "${2-}" ]] && { log "ERROR" "Option $1 needs an argument."; return 2; }; SSH_OPTIONS+=("$1" "$2"); shift 2 ;;
+      -l) LIST_ALL_MODE=true; shift ;;
+      -V) LIST_VERBOSE_MODE=true; LIST_ALL_MODE=true; shift ;;
+      --mass) MASS_MODE=true; shift ;;
+      --log) [[ -z "${2-}" ]] && { log "ERROR" "--log needs a file path."; return 2; }; LOG_FILE="$2"; shift 2 ;;
+      --log=*) LOG_FILE="${1#*=}"; shift ;;
+      --) shift; break ;;
+      -*) log "ERROR" "Unknown option: $1"; usage >&2; return 2 ;;
+      *) break ;;
+    esac
+  done
+  if "$LIST_ALL_MODE"; then return 0; fi
+  if [[ $# -eq 0 ]]; then log "ERROR" "No host pattern provided."; usage >&2; return 2; fi
+  PATTERN="$1"; shift; COMMAND=("$@"); return 0
 }
 
-validate_prerequisites() {
-    [[ ! -f "${SSH_CONFIG_FILE}" ]] && log "WARN" "SSH config file not found. Proceeding without it."
-    [[ -z "${PATTERN:-}" ]] && log "ERROR" "No pattern provided." && exit 1
-    log "DEBUG" "Prerequisites validated."
+resolve_ssh_configs() {
+  local config_file="$1"
+  [[ -f "$config_file" ]] || return 0
+  printf '%s\n' "$config_file"
+  local base_dir; base_dir="$(dirname "$config_file")"
+  awk 'BEGIN{IGNORECASE=1}/^[[:space:]]*include[[:space:]]+/{$1="";print $0}' "$config_file" |
+  while read -r line; do
+    # shellcheck disable=SC2043
+    for pattern in $line; do # Word splitting is intentional here
+      pattern="${pattern/#\~/$HOME}"
+      [[ "$pattern" != /* ]] && pattern="${base_dir}/${pattern}"
+      # Recursively resolve for glob patterns
+      for f in $pattern; do resolve_ssh_configs "$f"; done
+    done
+  done
 }
 
-validate_command() {
-    local forbidden_commands=("shutdown" "poweroff" "reboot")
-    for cmd in "${forbidden_commands[@]}"; do
-        if [[ "${COMMAND[*]}" =~ $cmd ]]; then
-            log "ERROR" "The command '${cmd}' is not allowed in mass mode."
-            exit 1
-        fi
-    done
+parse_ssh_host_data() {
+  local m="$1" p="${2:-}"; shift 2; local f=("$@")
+  # AWK FIX: Changed loop variable 'h' in the final 'else' block to 'host' to avoid conflict
+  # with the array 'h' used for storing HostName values. This resolves the fatal error.
+  awk -v m="$m" -v p="$p" '
+    function flush(a){for(a in b)all[a]=(a in h?h[a]:a);delete b;delete h}
+    BEGIN{IGNORECASE=1}FNR==1{flush()}
+    /^[[:space:]]*#/||/^[[:space:]]*$/{next}
+    tolower($1)=="host"{flush();for(i=2;i<=NF;i++)if($i!="*")b[$i]=1;next}
+    tolower($1)=="match"{flush()}tolower($1)=="hostname"{for(a in b)h[a]=$2;next}
+    END{flush();if(m=="extract"){for(a in all)if(a~p)print all[a]}
+    else if(m=="list_verbose"){for(a in all)if(a!~/[*?]/)printf "%s\t%s\n",a,all[a]}
+    else{for(a in all)if(a!~/[*?]/)s[all[a]]=1;for(host in s)print host}}' "${f[@]}"
+}
+
+do_list_all() {
+  (( ${#SSH_CONFIG_FILES[@]} == 0 )) && return 0
+  local mode="list"; "$LIST_VERBOSE_MODE" && mode="list_verbose"
+  parse_ssh_host_data "$mode" "" "${SSH_CONFIG_FILES[@]}" | sort -u
 }
 
 extract_hosts() {
-    local host_pattern="${PATTERN}"
-    
-    if [[ "${host_pattern}" =~ "@" ]]; then
-        USERNAME="${host_pattern%@*}"
-        HOST_PATTERN="${host_pattern#*@}"
-        log "DEBUG" "Extracted username: ${USERNAME}, host pattern: ${HOST_PATTERN}"
-    else
-        USERNAME=""
-        HOST_PATTERN="${host_pattern}"
-        log "DEBUG" "Host pattern: ${HOST_PATTERN}"
-    fi
-
-    HOSTS=$(awk -v pattern="$HOST_PATTERN" '
-        # Remove leading/trailing whitespace
-        { sub(/^ +/, ""); sub(/ +$/, ""); }
-
-        # Skip empty lines or comments
-        /^$/ || /^#/ { next }
-
-        # Handle Hostname lines and associate them with the current host
-        /^Hostname/ {
-            if (current_host) {
-                hostnames[current_host] = $2
-            }
-        }
-
-        # Handle Host lines
-        /^Host/ {
-            split($0, hosts, " ")
-            for (i=2; i<=NF; i++) {
-                if (hosts[i] !~ /\*/) {
-                    current_host = hosts[i]
-                    hosts_array[hosts[i]] # Store host without *
-                }
-            }
-        }
-
-        END {
-            for (host in hosts_array) {
-                if (tolower(host) ~ pattern && host !~ /\*$/) {
-                    if (hostnames[host]) {
-                        if (!(hostnames[host] in printed)) {
-                            print hostnames[host] # Print Hostname if available
-                            printed[hostnames[host]] = 1
-                        }
-                    } else {
-                        if (!(host in printed)) {
-                            print host # Otherwise, print Host entry itself
-                            printed[host] = 1
-                        }
-                    }
-                }
-            }
-        }
-    ' ${SSH_CONFIG_FILE} | sort -V
-)
-
-    HOST_COUNT=$(echo "$HOSTS" | wc -l)
-    
-    if [[ $HOST_COUNT -gt 1 ]]; then 
-        if [[ "$MASS_MODE" != true ]]; then
-            echo "Multiple hosts detected:"
-            for host in $HOSTS; do
-                echo "- $host"
-            done
-            echo "Use --mass flag to execute commands on multiple hosts."
-            exit 1
-        fi
-
-        if [[ ${#COMMAND[@]} -eq 0 ]]; then 
-            log "ERROR" "--mass requires a command to be provided."
-            exit 1 
-        fi 
-    fi
-
-    if [[ -z "${HOSTS}" ]]; then 
-        log "WARN" "No hosts found matching '${HOST_PATTERN}'. Falling back to direct connection."
-        HOSTS="${HOST_PATTERN}"  # Fallback to the provided input as the host.
-    fi
-
-    log "DEBUG" "Matching hosts: $(echo "${HOSTS}" | tr '\n' ' ')"
+  local pattern="$PATTERN"
+  if [[ "$pattern" == *"@"* ]]; then USERNAME="${pattern%@*}"; pattern="${pattern#*@}"; fi
+  if (( ${#SSH_CONFIG_FILES[@]} > 0 )); then
+    mapfile -t HOSTS < <(parse_ssh_host_data "extract" "$pattern" "${SSH_CONFIG_FILES[@]}" | sort -u)
+  fi
+  if (( ${#HOSTS[@]} == 0 )); then
+    HOSTS=("$pattern")
+  fi
+  if (( ${#HOSTS[@]} > 1 )) && ! "$MASS_MODE"; then
+    log "ERROR" "Pattern matched multiple hosts. Use --mass."
+    printf '%s\n' "${HOSTS[@]/#/- }" >&2
+    return 1
+  fi
 }
 
-execute_ssh_command() {
-    for HOST in ${HOSTS}; do
-        if [[ "$VERBOSE_MODE" == true ]]; then
-            echo "Executing command on $HOST:"
-        fi
+ssh_exec() {
+  local host="$1"; shift
+  local cmd=(ssh -q -o LogLevel=ERROR -o ConnectTimeout=5)
+  [[ -n "$USERNAME" ]] && cmd+=("-l" "$USERNAME")
+  ((${#SSH_OPTIONS[@]} > 0)) && cmd+=("${SSH_OPTIONS[@]}")
+  cmd+=("$host")
+  ((${#} > 0)) && cmd+=("$@")
+  "${cmd[@]}"
+}
 
-        if [[ "$MASS_MODE" != true ]]; then
-            echo -ne "\033]30;${USERNAME}@${HOST}\007"
-        fi
+execute_serial() {
+  for host in "${HOSTS[@]}"; do
+    "$VERBOSE_MODE" && log "INFO" "Connecting to $host (${COMMAND[*]:-interactive})..."
+    if ! ssh_exec "$host" "${COMMAND[@]}"; then
+      log "ERROR" "SSH failed on host: $host"
+    fi
+  done
+}
 
-        local ssh_command=("ssh" "-q" "-o" "LogLevel=error" "-o" "ConnectTimeout=5")
-        if [[ -n "${USERNAME}" ]]; then
-            ssh_command+=("-l" "${USERNAME}")
-        fi
-        ssh_command+=("${SSH_OPTIONS[@]}" "${HOST}")
+execute_parallel() {
+  if (( ${#COMMAND[@]} == 0 )); then
+    log "ERROR" "Command required for --mass mode."
+    usage >&2
+    return 2
+  fi
 
-        if [[ ${#COMMAND[@]} -gt 0 ]]; then
-            ssh_command+=("${COMMAND[@]}")
-            log "DEBUG" "Executing command: ${ssh_command[*]}"
-            
-            if ! "${ssh_command[@]}"; then
-                log "ERROR" "Command failed on ${HOST}"
-                continue
-            fi
-        else
-            log "DEBUG" "Opening interactive session: ${ssh_command[*]}"
-            
-            if ! "${ssh_command[@]}"; then
-                log "ERROR" "Session failed on ${HOST}"
-                continue
-            fi
-        fi
+  # PORTABILITY: Use portable mktemp syntax
+  XSSH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/xssh.XXXXXX")"
+  
+  local pids=()
+  for host in "${HOSTS[@]}"; do
+    (
+      local safe_host; safe_host="$(sanitize_for_filename "$host")"
+      local out="$XSSH_TMPDIR/$safe_host.out"
+      local err="$XSSH_TMPDIR/$safe_host.err"
+      
+      if "$VERBOSE_MODE"; then
+        printf -- '--- %s ---\n' "$host" >"$out"
+      fi
+      
+      # ROBUSTNESS: Redirect errors to a per-host file to avoid interleaved output
+      if ! ssh_exec "$host" "${COMMAND[@]}" >>"$out" 2>>"$err"; then
+        printf 'SSH command failed on host: %s\n' "$host" >> "$err"
+      fi
+    ) &
+    pids+=($!)
+  done
 
-        if [[ "$MASS_MODE" != true ]]; then
-            # Reset tab name after session
-            echo -ne "\033]30;\007"
-        fi
+  # Wait for all background jobs to complete.
+  # Ignore non-zero exit codes from 'wait' as failed SSH commands are expected.
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
 
-        log "DEBUG" "Command executed successfully on ${HOST}"
+  # Aggregate and display outputs, sorted by host name.
+  # Using find + sort + a loop is robust and portable.
+  mapfile -t out_files < <(find "$XSSH_TMPDIR" -name "*.out" -type f | sort)
+  if (( ${#out_files[@]} > 0 )); then
+    for f in "${out_files[@]}"; do
+      # Only cat files with content to avoid extra newlines.
+      [[ -s "$f" ]] && cat "$f"
     done
+  fi
 
-    log "DEBUG" "All commands attempted."
+  # Aggregate and display errors
+  mapfile -t err_files < <(find "$XSSH_TMPDIR" -name "*.err" -type f -size +0c | sort)
+  if (( ${#err_files[@]} > 0 )); then
+    log "WARN" "Errors were reported by one or more hosts:"
+    cat "${err_files[@]}" >&2
+  fi
 }
 
-parallel_execute() {
-    if [[ "$MASS_MODE" == true ]]; then
-        local tmpdir=$(mktemp -d)
-        for HOST in ${HOSTS}; do
-            local tmpfile="${tmpdir}/${HOST}.out"
-            (
-                if [[ "$VERBOSE_MODE" == true ]]; then
-                    echo "--- $HOST ---" > "$tmpfile"
-                fi
+# --- Main Controller ---
 
-                local ssh_command=("ssh" "-q" "-o" "LogLevel=error" "-o" "ControlMaster auto" "-o" "ControlPersist 4h")
-                if [[ -n "${USERNAME}" ]]; then
-                    ssh_command+=("-l" "${USERNAME}")
-                fi
-                ssh_command+=("${SSH_OPTIONS[@]}" "${HOST}")
+main() {
+  parse_arguments "$@" || exit $?
 
-                if [[ ${#COMMAND[@]} -gt 0 ]]; then
-                    ssh_command+=("-T")
-                    ssh_command+=("${COMMAND[@]}")
-                    log "DEBUG" "Executing command on ${HOST}: ${ssh_command[*]}"
-                    
-                    if ! "${ssh_command[@]}" >> "$tmpfile"; then
-                        log "ERROR" "Command failed on ${HOST}"
-                    fi
-                else
-                    log "DEBUG" "Opening interactive session on ${HOST}: ${ssh_command[*]}"
-                    
-                    if ! "${ssh_command[@]}" >> "$tmpfile"; then
-                        log "ERROR" "Session failed on ${HOST}"
-                    fi
-                fi
+  # EFFICIENCY: Resolve SSH config files once at the beginning
+  mapfile -t SSH_CONFIG_FILES < <(resolve_ssh_configs "$SSH_MAIN_CONFIG" | sort -u)
 
-                log "DEBUG" "Command executed on ${HOST}"
-            ) &
-        done
-        wait
-
-        for file in "${tmpdir}"/*.out; do
-            cat "$file"
-        done
-
-        rm -rf "$tmpdir"
-    fi
-}
-
-
-execute_ssh_command_single_host() {
-    local HOST="$1"
-    if [[ "$VERBOSE_MODE" == true ]]; then
-        echo "--- $HOST ---"
-    fi
-
-    local ssh_command=("ssh" "-q" "-o" "LogLevel=error")
-    if [[ -n "${USERNAME}" ]]; then
-        ssh_command+=("-l" "${USERNAME}")
-    fi
-    ssh_command+=("${SSH_OPTIONS[@]}" "${HOST}")
-
-    if [[ ${#COMMAND[@]} -gt 0 ]]; then
-        ssh_command+=("${COMMAND[@]}")
-        log "DEBUG" "Executing command on ${HOST}: ${ssh_command[*]}"
-        
-        if ! "${ssh_command[@]}"; then
-            log "ERROR" "Command failed on ${HOST}"
-        fi
-    else
-        log "DEBUG" "Opening interactive session on ${HOST}: ${ssh_command[*]}"
-        
-        if ! "${ssh_command[@]}"; then
-            log "ERROR" "Session failed on ${HOST}"
-        fi
-    fi
-
-    log "DEBUG" "Command executed on ${HOST}"
-}
-
-
-## MAIN EXECUTION ##############################################################
-trap 'log "ERROR" "Operation interrupted."; exit 130' SIGINT
-
-parse_arguments "$@"
-if [[ -z "${PATTERN:-}" ]]; then
-    log "ERROR" "No pattern provided."
-    usage
-    exit 1
-fi
-
-if [[ "$1" == "-h" || "$1" == "--help" ]]; then
-    usage
+  if "$LIST_ALL_MODE"; then
+    do_list_all
+    trap_off
     exit 0
-fi
+  fi
 
-validate_prerequisites
-extract_hosts
+  command -v ssh >/dev/null || { log "ERROR" "'ssh' not found."; trap_off; exit 1; }
+  
+  extract_hosts || { trap_off; exit 1; }
 
-if [[ "$MASS_MODE" == true ]]; then
-    parallel_execute
-else
-    execute_ssh_command
-fi
+  if "$MASS_MODE"; then
+    execute_parallel
+  else
+    execute_serial
+  fi
+  
+  trap_off
+}
+
+main "$@"
