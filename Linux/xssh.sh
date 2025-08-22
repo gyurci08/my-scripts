@@ -5,7 +5,9 @@
 # Refactored for improved robustness, portability, error forwarding, and
 # bash autocompletion.
 
+
 # --- Script Configuration & Initialization ---
+
 
 # Exit immediately if a command exits with a non-zero status.
 # Treat unset variables as an error.
@@ -14,9 +16,11 @@
 # Inherit traps by functions, command substitutions, and subshells.
 set -Eeuo pipefail
 
+
 # --- Constants & Globals ---
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SSH_MAIN_CONFIG="${HOME}/.ssh/config"
+
 
 # Global state variables
 LOG_FILE=""
@@ -33,7 +37,9 @@ HOSTS=()
 XSSH_TMPDIR=""
 
 
+
 # --- Core Utilities & Trap Handling ---
+
 
 log() {
   local level="$1"; shift
@@ -53,15 +59,18 @@ log() {
   fi
 }
 
+
 # Unset traps. Called before a clean exit to prevent false positives.
 trap_off() {
   trap - ERR
 }
 
+
 # Generic error handler, triggered by 'set -e'.
 err_handler() {
   log "ERROR" "Unexpected error on line $1: $2"
 }
+
 
 # Handle Ctrl+C interruptions.
 sigint_handler() {
@@ -70,6 +79,7 @@ sigint_handler() {
   exit 130
 }
 
+
 # Cleanup temporary files on script exit.
 exit_handler() {
   if [[ -n "$XSSH_TMPDIR" && -d "$XSSH_TMPDIR" ]]; then
@@ -77,12 +87,15 @@ exit_handler() {
   fi
 }
 
+
 trap 'err_handler $LINENO "$BASH_COMMAND"' ERR
 trap 'sigint_handler' SIGINT
 trap 'exit_handler' EXIT
 
 
+
 # --- Helper Functions ---
+
 
 # Replaces characters that are problematic in filenames.
 sanitize_for_filename() {
@@ -90,16 +103,20 @@ sanitize_for_filename() {
 }
 
 
+
 # --- Usage & Autocompletion ---
+
 
 usage() {
   cat <<'EOF'
 Execute commands over SSH with host discovery and mass mode.
 
+
 Usage:
   xssh [options] pattern [command]
   xssh -l                     # List all hosts from SSH config(s)
-  xssh -V                     # List "alias<TAB>hostname" for all hosts
+  xssh -V                     # List "alias<TAB>alias" for all hosts
+
 
 Options:
   -v, --verbose      Verbose mode.
@@ -107,14 +124,15 @@ Options:
   -p port            Specify SSH port.
   -L arg             Specify local port forwarding.
   -D arg             Specify dynamic port forwarding.
-  -l                 List all unique hostnames from SSH config files.
-  -V                 Verbose list: provides "alias<TAB>hostname" for all hosts.
+  -l                 List all unique host aliases from SSH config files.
+  -V                 Verbose list: provides "alias<TAB>alias" for all hosts.
   --mass             Execute command in parallel on all matching hosts.
   --log FILE         Append logs to the specified file.
   --generate-completion  Generate the bash completion script.
   -h, --help         Show this help message.
 EOF
 }
+
 
 generate_completion_script() {
   # This function prints the bash completion script to stdout with clear instructions.
@@ -144,23 +162,28 @@ generate_completion_script() {
 #
 # --- Completion Script ---
 
+
 _xssh_completion() {
     local cur prev words cword
     _get_comp_words_by_ref -n : cur prev words cword
 
+
     local SCRIPT_NAME; SCRIPT_NAME="$(basename "${words[0]}")"
     local opts="-v -X -p -L -D -l -V --mass --log --help --generate-completion"
+
 
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "${opts}" -- "$cur") )
         return 0
     fi
 
+
     case "$prev" in
         -p|-L|-D|--log)
             return 0 # No suggestions for option arguments
             ;;
     esac
+
 
     # Find the first positional argument (the pattern)
     local i=1
@@ -177,11 +200,12 @@ _xssh_completion() {
         ((i++))
     done
 
+
     # If we are here, we are completing the host pattern.
-    # Use xssh -V to get "alias<TAB>hostname" and complete on both.
+    # Use xssh -V to get "alias<TAB>alias" and complete on the alias.
     # Stderr is redirected to hide script logs during completion.
     local host_list
-    host_list=$(xssh -V 2>/dev/null | awk '{print $1; print $2}')
+    host_list=$(xssh -V 2>/dev/null | awk '{print $1}')
     if [[ -n "$host_list" ]]; then
         COMPREPLY=( $(compgen -W "${host_list}" -- "$cur") )
     fi
@@ -191,7 +215,9 @@ EOF
 }
 
 
+
 # --- Business Logic ---
+
 
 parse_arguments() {
   while [[ $# -gt 0 ]]; do
@@ -216,6 +242,7 @@ parse_arguments() {
   PATTERN="$1"; shift; COMMAND=("$@"); return 0
 }
 
+
 resolve_ssh_configs() {
   local config_file="$1"
   [[ -f "$config_file" ]] || return 0
@@ -234,27 +261,63 @@ resolve_ssh_configs() {
   done
 }
 
+
 parse_ssh_host_data() {
   local m="$1" p="${2:-}"; shift 2; local f=("$@")
-  # AWK script to parse SSH config files for host aliases and hostnames.
-  # PORTABILITY: Using tolower() for case-insensitivity.
+  # AWK script to parse SSH config files for host aliases.
+  # This version now correctly uses the alias and ignores the Hostname directive.
   awk -v m="$m" -v p="$p" '
-    function flush(a){for(a in b)all[a]=(a in h?h[a]:a);delete b;delete h}
-    FNR==1{flush()}
-    /^[[:space:]]*#/||/^[[:space:]]*$/{next}
-    tolower($1)=="host"{flush();for(i=2;i<=NF;i++)if($i!="*")b[$i]=1;next}
-    tolower($1)=="match"{flush()} # Skip match blocks
-    tolower($1)=="hostname"{for(a in b)h[a]=$2;next}
-    END{flush();if(m=="extract"){for(a in all)if(a~p)print all[a]}
-    else if(m=="list_verbose"){for(a in all)if(a!~/[*?]/)printf "%s\t%s\n",a,all[a]}
-    else{for(a in all)if(a!~/[*?]/)s[all[a]]=1;for(host in s)print host}}' "${f[@]}"
+    # flush() commits the currently parsed block (aliases in `b`)
+    # to the master `all` array. It now always uses the alias as the value.
+    function flush(loop_alias) {
+      for (loop_alias in b) {
+        # MODIFIED: Always use the alias, letting the ssh client handle Hostname resolution.
+        all[loop_alias] = loop_alias
+      }
+      delete b
+    }
+
+    FNR == 1 { flush() }
+    /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+
+    tolower($1) == "host" {
+      flush()
+      # Clear previous block data
+      delete b
+      # Populate new block aliases
+      for (i = 2; i <= NF; i++) {
+        if ($i != "*") b[$i] = 1
+      }
+      next
+    }
+
+    # "Match" blocks reset parsing context. Flush previous block and ignore the match.
+    tolower($1) == "match" { flush(); next }
+
+    # Other keywords like Hostname are now effectively ignored by this parser,
+    # as we only care about the "Host" alias blocks.
+
+    END {
+      flush()
+      if (m == "extract") {
+        for (alias in all) if (alias ~ p) print all[alias]
+      } else if (m == "list_verbose") {
+        for (alias in all) if (alias !~ /[*?]/) printf "%s\t%s\n", alias, all[alias]
+      } else { # "list" mode
+        for (alias in all) if (alias !~ /[*?]/) s[all[alias]] = 1
+        for (host in s) print host
+      }
+    }
+  ' "${f[@]}"
 }
+
 
 do_list_all() {
   (( ${#SSH_CONFIG_FILES[@]} == 0 )) && return 0
   local mode="list"; "$LIST_VERBOSE_MODE" && mode="list_verbose"
   parse_ssh_host_data "$mode" "" "${SSH_CONFIG_FILES[@]}" | sort -u
 }
+
 
 extract_hosts() {
   local pattern="$PATTERN"
@@ -273,6 +336,7 @@ extract_hosts() {
   fi
 }
 
+
 ssh_exec() {
   local host="$1"; shift
   # Removed -q and -o LogLevel=ERROR to allow SSH to show its own connection errors.
@@ -284,6 +348,7 @@ ssh_exec() {
   "${cmd[@]}"
 }
 
+
 execute_serial() {
   for host in "${HOSTS[@]}"; do
     "$VERBOSE_MODE" && log "INFO" "Connecting to $host (${COMMAND[*]:-interactive session})..."
@@ -292,12 +357,14 @@ execute_serial() {
   done
 }
 
+
 execute_parallel() {
   if (( ${#COMMAND[@]} == 0 )); then
     log "ERROR" "A command is required for --mass mode."
     usage >&2
     return 2
   fi
+
 
   XSSH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/xssh.XXXXXX")"
   
@@ -319,10 +386,12 @@ execute_parallel() {
     pids+=($!)
   done
 
+
   # Wait for all background jobs.
   for pid in "${pids[@]}"; do
     wait "$pid" || true
   done
+
 
   # Use mapfile -d '' to read null-delimited output from find.
   # This correctly handles all filenames and creates an empty array if no files are found.
@@ -335,6 +404,7 @@ execute_parallel() {
     done
   fi
 
+
   # Apply the same robust file-gathering logic for error files.
   local err_files=()
   mapfile -d '' -t err_files < <(find "$XSSH_TMPDIR" -name "*.err" -type f -size +0c -print0 | sort -z)
@@ -346,13 +416,17 @@ execute_parallel() {
 }
 
 
+
 # --- Main Controller ---
+
 
 main() {
   parse_arguments "$@" || exit $?
 
+
   # Resolve SSH config files once at the beginning.
   mapfile -t SSH_CONFIG_FILES < <(resolve_ssh_configs "$SSH_MAIN_CONFIG" | sort -u)
+
 
   if "$LIST_ALL_MODE"; then
     do_list_all
@@ -360,9 +434,11 @@ main() {
     exit 0
   fi
 
+
   command -v ssh >/dev/null || { log "ERROR" "'ssh' command not found in PATH."; trap_off; exit 1; }
   
   extract_hosts || { trap_off; exit 1; }
+
 
   if "$MASS_MODE"; then
     execute_parallel
@@ -372,6 +448,7 @@ main() {
   
   trap_off
 }
+
 
 # Pass all script arguments to the main function.
 main "$@"
