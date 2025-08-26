@@ -5,7 +5,9 @@
 # Refactored for improved robustness, maintainability, and error handling.
 #===============================================================================
 
+
 # --- Script Configuration & Initialization ---
+
 
 # Exit immediately if a command exits with a non-zero status.
 # Treat unset variables as an error when performing parameter expansion.
@@ -14,9 +16,11 @@
 # Inherit traps by functions, command substitutions, and subshells.
 set -Eeuo pipefail
 
+
 # --- Constants & Globals ---
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly SSH_MAIN_CONFIG="${HOME}/.ssh/config"
+
 
 # --- Global State Variables ---
 LIST_MODE=""
@@ -30,7 +34,9 @@ HOSTS=()
 PATTERN=""
 COMMAND=()
 
+
 # --- Core Utilities & Trap Handling ---
+
 
 log() {
   local level="$1"; shift
@@ -52,16 +58,19 @@ log() {
   fi
 }
 
+
 # Unset traps. Called before a clean, controlled exit to prevent false positives.
 trap_off() {
   trap - ERR
 }
+
 
 # Generic error handler for unexpected script errors.
 err_handler() {
   local exit_code=$?
   log "ERROR" "Unexpected script error on line $1 (Command: $2, Exit Code: $exit_code)"
 }
+
 
 # Handle Ctrl+C interruptions.
 sigint_handler() {
@@ -74,6 +83,7 @@ sigint_handler() {
   exit 130
 }
 
+
 # Cleanup temporary files on script exit.
 exit_handler() {
   if [[ -n "$XSSH_TMPDIR" && -d "$XSSH_TMPDIR" ]]; then
@@ -84,27 +94,34 @@ exit_handler() {
   fi
 }
 
+
 trap 'err_handler $LINENO "$BASH_COMMAND"' ERR
 trap 'sigint_handler' SIGINT
 trap 'exit_handler' EXIT
 
+
 # --- Helper Functions ---
+
 
 sanitize_for_filename() {
   printf '%s' "$1" | sed 's/[^a-zA-Z0-9._-]/_/g'
 }
 
+
 # --- Usage & Autocompletion ---
+
 
 usage() {
   cat <<'EOF'
 Execute commands over SSH with host discovery and mass mode.
 Any standard ssh options (e.g., -p, -X, -i) can be passed directly.
 
+
 Usage:
   xssh [xssh-options] [ssh-options] pattern [command]
   xssh -l                     # List all host aliases from SSH config(s)
   xssh -V                     # List "alias<TAB>Hostname" for all hosts
+
 
 xssh Options:
   -v, --verbose      Verbose mode.
@@ -116,6 +133,7 @@ xssh Options:
   -h, --help         Show this help message.
 EOF
 }
+
 
 generate_completion_script() {
   cat <<'EOF'
@@ -156,7 +174,9 @@ complete -F _xssh_completion xssh
 EOF
 }
 
+
 # --- Business Logic ---
+
 
 parse_arguments() {
   while [[ $# -gt 0 ]]; do
@@ -185,6 +205,7 @@ parse_arguments() {
   fi
 }
 
+
 resolve_ssh_configs() {
   local config_file="$1"
   [[ -r "$config_file" ]] || return 0
@@ -200,6 +221,7 @@ resolve_ssh_configs() {
     done
   done
 }
+
 
 parse_ssh_host_data() {
   local mode="$1" pattern="${2:-}"; shift 2; local files=("$@")
@@ -226,7 +248,7 @@ parse_ssh_host_data() {
       if (mode == "list_verbose") {
         for (alias in hostnames) if (alias !~ /[*?]/) printf "%s\t%s\n", alias, hostnames[alias]
       } else if (mode == "extract") {
-        for (alias in all_aliases) if (alias ~ pattern) print alias
+        for (alias in all_aliases) if (alias ~ pattern) print hostnames[alias]
       } else {
         for (alias in all_aliases) if (alias !~ /[*?]/) s[alias] = 1
         for (host in s) print host
@@ -235,11 +257,13 @@ parse_ssh_host_data() {
   ' "${files[@]}"
 }
 
+
 do_list_all() {
   (( ${#SSH_CONFIG_FILES[@]} == 0 )) && return 0
   local mode="simple"; [[ "$LIST_MODE" == "verbose" ]] && mode="list_verbose"
   parse_ssh_host_data "$mode" "" "${SSH_CONFIG_FILES[@]}" | sort -u
 }
+
 
 extract_hosts() {
   if (( ${#SSH_CONFIG_FILES[@]} > 0 )); then
@@ -253,6 +277,7 @@ extract_hosts() {
   fi
 }
 
+
 ssh_exec() {
   local host="$1"; shift
   local cmd=(ssh -o ConnectTimeout=5)
@@ -261,6 +286,7 @@ ssh_exec() {
   if (( $# > 0 )); then cmd+=("$@"); fi
   if ! "$MASS_MODE" && [[ -t 1 ]]; then exec "${cmd[@]}"; else "${cmd[@]}"; fi
 }
+
 
 execute_serial() {
   for host in "${HOSTS[@]}"; do
@@ -271,11 +297,10 @@ execute_serial() {
   done
 }
 
+
 _run_parallel_task() {
-    # CRITICAL: This function runs in a backgrounded subshell. We MUST disable
-    # the parent's ERR trap. Otherwise, an expected remote command failure
-    # (e.g., grep not finding a match) would trigger the main err_handler.
     trap '' ERR
+
 
     local host="$1"
     local safe_host; safe_host="$(sanitize_for_filename "$host")"
@@ -283,17 +308,21 @@ _run_parallel_task() {
     local err="$XSSH_TMPDIR/$safe_host.err"
     if "$VERBOSE_MODE"; then printf -- '--- %s ---\n' "$host" >"$out"; fi
 
+
     # The subshell will exit with the status of ssh_exec.
     ssh_exec "$host" "${COMMAND[@]}" >>"$out" 2>>"$err"
 }
+
 
 execute_parallel() {
   if (( ${#COMMAND[@]} == 0 )); then
     log "ERROR" "A command is required for --mass mode."; usage >&2; trap_off; exit 2
   fi
 
+
   XSSH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/xssh.XXXXXX")"
   if "$VERBOSE_MODE"; then log "INFO" "Using temporary directory for parallel output: $XSSH_TMPDIR"; fi
+
 
   local pids=()
   for host in "${HOSTS[@]}"; do
@@ -301,9 +330,8 @@ execute_parallel() {
     pids+=($!)
   done
 
+
   local failed_pids=0
-  # CRITICAL: Temporarily disable both the ERR trap and exit-on-error.
-  # This allows the `wait` command to report a failure without triggering the trap or exiting the script.
   trap_off
   set +e
   for pid in "${pids[@]}"; do
@@ -312,18 +340,20 @@ execute_parallel() {
       ((failed_pids++))
     fi
   done
-  # CRITICAL: Restore the trap and exit-on-error settings.
   set -e
   trap 'err_handler $LINENO "$BASH_COMMAND"' ERR
+
 
   # Aggregate and print output and errors.
   local out_files=(); mapfile -d '' -t out_files < <(find "$XSSH_TMPDIR" -name "*.out" -type f -size +0c -print0 | sort -z)
   if (( ${#out_files[@]} > 0 )); then for f in "${out_files[@]}"; do cat -- "$f"; done; fi
 
+
   local err_files=(); mapfile -d '' -t err_files < <(find "$XSSH_TMPDIR" -name "*.err" -type f -size +0c -print0 | sort -z)
   if (( ${#err_files[@]} > 0 )); then
     log "WARN" "Errors were reported by one or more hosts:"; cat -- "${err_files[@]}" >&2
   fi
+
 
   if (( failed_pids > 0 )); then
     log "WARN" "${failed_pids} of ${#pids[@]} remote commands failed."
@@ -331,7 +361,9 @@ execute_parallel() {
   fi
 }
 
+
 # --- Main Controller ---
+
 
 main() {
   parse_arguments "$@" || { trap_off; exit $?; }
@@ -344,5 +376,6 @@ main() {
   if "$MASS_MODE"; then execute_parallel; else execute_serial; fi
   trap_off
 }
+
 
 main "$@"
