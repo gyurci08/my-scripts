@@ -28,8 +28,8 @@ readonly IFACE="ens18" # IMPORTANT: Adjust to your public-facing network interfa
 
 #===[ CONFIGURATION: DEFINE YOUR UDP FORWARDING RULES HERE ]==================#
 declare -a FORWARDINGS=(
-    "udp:185.65.68.179:58423:10.0.1.106:58423"
-    "udp:185.65.68.179:20001-20999:10.0.1.105:20001-20999"
+    "udp:300.10.68.10:58423:10.0.1.106:58423"
+    "udp:300.10.68.10:20001-20999:10.0.1.105:20001-20999"
 )
 
 readonly INTERNAL_NET_CIDR="10.0.1.0/24"
