@@ -2,25 +2,29 @@
 set -Eeuo pipefail
 
 ## CONSTANTS ###################################################################
-readonly SCRIPT_DIR="$(dirname "$(realpath -s "${BASH_SOURCE[0]}")")"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-readonly LOG_PREFIX="[OPEN_SUSE_CLOUD_VM]"
 readonly VM_SANDBOX_DIR="${HOME}/vm-sandbox"
-readonly IMAGE_URL="https://download.opensuse.org/repositories/Cloud:/Images:/Leap_15.6/images/openSUSE-Leap-15.6.x86_64-NoCloud.qcow2"
-readonly LOCAL_IMAGE_FILE="${VM_SANDBOX_DIR}/opensuse-cloud.qcow2"
 readonly LIBVIRT_IMAGE_DIR="/var/lib/libvirt/images"
 readonly USER_DATA_FILE="${VM_SANDBOX_DIR}/user-data"
 readonly META_DATA_FILE="${VM_SANDBOX_DIR}/meta-data"
 readonly REQUIRED_BINS=("wget" "virt-install" "cloud-localds" "virsh" "sudo")
 
+## DISTRO-SPECIFIC VARS (set by configure_distro) ##############################
+IMAGE_URL=""
+LOCAL_IMAGE_FILE=""
+DEFAULT_SSH_USER=""
+DEFAULT_SSH_PASSWORD=""
+OS_VARIANT=""
+VM_NAME_BASE=""
+LOG_PREFIX="[CLOUD_VM]"
+
 ## DEFAULTS ####################################################################
 DEFAULT_VM_RAM_MB=2048
 DEFAULT_VM_VCPUS=2
 DEFAULT_VM_DISK_GB=20
-DEFAULT_SSH_USER="opensuse"
-DEFAULT_SSH_PASSWORD="opensuse"
 
 ## DYNAMIC VARIABLES ##########################################################
+DISTRO="opensuse"
 NON_INTERACTIVE=false
 VM_NAME=""
 VM_RAM_MB=""
@@ -36,15 +40,17 @@ CLOUD_INIT_ISO=""
 
 usage() {
     cat <<EOF
-Usage: $SCRIPT_NAME [-y|--yes] [-h|--help]
+Usage: $SCRIPT_NAME [-d|--distro DISTRO] [-y|--yes] [-h|--help]
 
-Create an openSUSE Leap 15.6 cloud VM using libvirt/KVM.
+Create a cloud VM using libvirt/KVM.
 
 Options:
+  -d, --distro  Distro to install (default: opensuse)
+                Supported: opensuse, almalinux8, almalinux9
   -y, --yes     Non-interactive mode, use all defaults (SSH_PUB_KEY env var required)
   -h, --help    Show this help message
 
-Environment variables used as pre-fill:
+Environment variables:
   SSH_PUB_KEY   SSH public key to inject into the VM
 EOF
     exit 0
@@ -53,6 +59,11 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -d|--distro)
+                shift
+                [[ $# -eq 0 ]] && { echo "ERROR: --distro requires an argument" >&2; exit 1; }
+                DISTRO="$1"
+                ;;
             -y|--yes) NON_INTERACTIVE=true ;;
             -h|--help) usage ;;
             *) log_error "Unknown argument: $1"; usage ;;
@@ -61,13 +72,39 @@ parse_args() {
     done
 }
 
+configure_distro() {
+    case "$DISTRO" in
+        opensuse)
+            IMAGE_URL="https://download.opensuse.org/repositories/Cloud:/Images:/Leap_15.6/images/openSUSE-Leap-15.6.x86_64-NoCloud.qcow2"
+            LOCAL_IMAGE_FILE="${VM_SANDBOX_DIR}/opensuse-leap-15.6.qcow2"
+            DEFAULT_SSH_USER="opensuse"
+            DEFAULT_SSH_PASSWORD="opensuse"
+            OS_VARIANT="opensuse15.3"
+            VM_NAME_BASE="opensuse-cloud"
+            LOG_PREFIX="[OPENSUSE_CLOUD_VM]"
+            ;;
+        almalinux9)
+            IMAGE_URL="https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2"
+            LOCAL_IMAGE_FILE="${VM_SANDBOX_DIR}/almalinux-9-cloud.qcow2"
+            DEFAULT_SSH_USER="almalinux"
+            DEFAULT_SSH_PASSWORD="almalinux"
+            OS_VARIANT="almalinux9"
+            VM_NAME_BASE="almalinux9-cloud"
+            LOG_PREFIX="[ALMALINUX9_CLOUD_VM]"
+            ;;
+        *)
+            echo "ERROR: Unknown distro '$DISTRO'. Supported: opensuse, almalinux9, almalinux8" >&2
+            exit 1
+            ;;
+    esac
+}
+
 find_unique_vm_name() {
-    local base_name="opensuse-cloud"
-    local name="$base_name"
+    local name="$VM_NAME_BASE"
     local counter=1
 
     while virsh dominfo "$name" &>/dev/null; do
-        name="${base_name}-${counter}"
+        name="${VM_NAME_BASE}-${counter}"
         ((counter++))
     done
 
@@ -152,7 +189,7 @@ gather_inputs() {
     detected_key="$(detect_ssh_pubkey)"
 
     echo ""
-    echo "Configure your openSUSE Cloud VM:"
+    echo "Configure your ${DISTRO} cloud VM:"
     echo "  Press Enter to accept [default] values."
     echo ""
 
@@ -177,6 +214,7 @@ confirm_summary() {
 
     echo ""
     echo "Summary:"
+    printf "  %-20s %s\n" "Distro:"        "$DISTRO"
     printf "  %-20s %s\n" "VM Name:"       "$VM_NAME"
     printf "  %-20s %s MB\n" "RAM:"         "$VM_RAM_MB"
     printf "  %-20s %s\n" "vCPUs:"         "$VM_VCPUS"
@@ -214,7 +252,7 @@ download_image() {
     if [[ -f "$LOCAL_IMAGE_FILE" ]]; then
         log_info "Base image already exists at $LOCAL_IMAGE_FILE, skipping download."
     else
-        log_info "Downloading openSUSE cloud image to $LOCAL_IMAGE_FILE ..."
+        log_info "Downloading ${DISTRO} cloud image to $LOCAL_IMAGE_FILE ..."
         wget --show-progress -O "$LOCAL_IMAGE_FILE" "$IMAGE_URL"
         log_info "Download completed."
     fi
@@ -275,7 +313,7 @@ import_and_start_vm() {
         --disk path="$LIBVIRT_IMAGE_FILE",format=qcow2,bus=virtio \
         --disk path="$CLOUD_INIT_ISO",device=cdrom \
         --import \
-        --os-variant opensuse15.3 \
+        --os-variant "$OS_VARIANT" \
         --network network=default \
         --graphics none \
         --noautoconsole
@@ -286,7 +324,8 @@ import_and_start_vm() {
 ## MAIN ########################################################################
 
 parse_args "$@"
-log_header "openSUSE Cloud VM Setup"
+configure_distro
+log_header "${DISTRO} Cloud VM Setup"
 
 validate_binaries
 gather_inputs
@@ -301,6 +340,7 @@ create_cloud_init_iso
 import_and_start_vm
 
 log_header "Setup complete!"
+log_info "Distro:    $DISTRO"
 log_info "VM Name:   $VM_NAME"
 log_info "Disk:      $LIBVIRT_IMAGE_FILE"
 log_info "SSH:       ssh ${SSH_USER}@<VM_IP>"
